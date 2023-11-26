@@ -6,22 +6,11 @@
 
 /* ============================== SENSORS ============================== */
 
-#include "HX711.h"
-
-HX711 scale;
-
-uint8_t dataPin = 2;
-uint8_t clockPin = 4;
-
-// ===== 
-
-/*
 #include <ADS1220_WE.h>
 #include <SPI.h>
 #define ADS1220_CS_PIN    5 // chip select pin
-#define ADS1220_DRDY_PIN  15 // data ready pin
+#define ADS1220_DRDY_PIN  33 // data ready pin
 ADS1220_WE ads = ADS1220_WE(ADS1220_CS_PIN, ADS1220_DRDY_PIN);
-*/
 
 #include <Adafruit_MPU6050.h>
 #include <Adafruit_Sensor.h>
@@ -29,7 +18,7 @@ ADS1220_WE ads = ADS1220_WE(ADS1220_CS_PIN, ADS1220_DRDY_PIN);
 
 Adafruit_MPU6050 mpu;
 
-const int16_t read_n_max = 1000; // 1500 // max samples number
+const int16_t read_n_max = 1200; // 1500 // max samples number
 
 const float alpha_a = 0.1; // alpha filter for acc
 const float alpha_l = 0.1; // alpha filter for load
@@ -39,9 +28,12 @@ unsigned long startTime, endTime;
 // Diagnosis tips
 float v_diagnosis[10];
 double fill;
+double spm = 0.0;
 
 /* ============================== SIM7000G CONFIGURATIONS ============================== */
 #define TINY_GSM_MODEM_SIM7000
+#define TINY_GSM_RX_BUFFER 4096 // Set RX buffer to 1Kb
+
 #define SerialMon Serial
 #define SerialAT Serial1
 #define TINY_GSM_DEBUG SerialMon
@@ -54,6 +46,8 @@ const char gprsUser[] = "webgprs";
 const char gprsPass[] = "webgprs2002";
 
 #include <TinyGsmClient.h>
+#include <SD.h>
+#include "FS.h"
 
 #ifdef DUMP_AT_COMMANDS
   #include <StreamDebugger.h>
@@ -63,8 +57,7 @@ const char gprsPass[] = "webgprs2002";
   TinyGsm modem(SerialAT);
 #endif
 
-TinyGsmClient client(modem);
-//PubSubClient  mqtt(client);
+//TinyGsmClient client(modem); // ACTIVAR PARA SIM
 
 // LilyGO T-SIM7000G Pinout
 #define UART_BAUD           115200
@@ -73,6 +66,53 @@ TinyGsmClient client(modem);
 #define PIN_RX              26
 #define PWR_PIN             4
 
+#define SD_MISO             2
+#define SD_MOSI             15
+#define SD_SCLK             14
+#define SD_CS               13
+#define LED_PIN             12
+
+/* ============================== WIFI CONFIGURATIONS ============================== */
+#include <WiFi.h>
+
+#include <WiFi.h>
+//const char *ssid = "fly01";
+//const char *password = "blackmon2023";
+const char *ssid = "UNONU UM52";
+const char *password = "12345678";
+WiFiClient client; // desativar para sim
+
+
+/* ============================== MQTT CONFIGURATIONS ============================== */
+#include <PubSubClient.h>
+PubSubClient mqtt(client);
+//const char *broker = "broker.emqx.io";
+const char *broker = "broker.hivemq.com"; // < ================================= SERVER BROKER
+const int mqtt_port = 1883;
+const char *mqtt_user = "web_client";
+const char *mqtt_pass = "080076C";
+const char *mqtt_id = "kjljhbhjjihiukl";
+const char *topicSubscribe = "jphOandG/mexdevice"; // < ================================= TOPIC
+const char *topicPublish = "jphOandG/mexdata";
+
+/* ====================== DEVICE SETTINGS ======================== */
+#define uS_TO_S_FACTOR 1000000
+int TIME_TO_SLEEP = 900; // 5 minutes sleep
+
+RTC_DATA_ATTR unsigned int bootCount = 0; // data counter
+boolean Available = true; // false: only level / true: level and dynachart
+String DeviceName = "Titan112";
+String idTest;
+
+String status = ""; // global status
+int WaitTime = 150;
+unsigned long previousMillis = 0;
+
+float a0[50] = {-0.161094, 0.133767, 0.509254, 0.586077, 0.588004, 0.572422, 0.577633, 0.567187, 0.58284, 0.574648, 0.567952, 0.564416, 0.566411, 0.591799, 0.592944, 0.584578, 0.607816, 0.609944, 0.606361, 0.607037, 0.625326, 0.663207, 0.661868, 0.597974, 0.369072, 0.179431, -0.0484264, -0.113182, -0.097836, -0.0759193, -0.0531394, -0.0452247, -0.0245321, -0.0140658, -0.010772, -0.0177663, -0.0145408, -0.00956059, -0.0108517, 0.00724792, 0.0163409, 0.0166782, 0.0187881, 0.0292116, 0.0331711, 0.0459051, 0.0554916, -0.0497948, -0.202742, -0.291714};
+
+void mqttCallback(char *topic, byte *payload, unsigned int length);
+
+/* ====================== SIM FUNCTIONS ======================== */
 void modemPowerOn(){
   pinMode(PWR_PIN, OUTPUT);
   digitalWrite(PWR_PIN, LOW);
@@ -93,53 +133,34 @@ void modemRestart(){
   modemPowerOn();
 }
 
-/* ============================== WIFI CONFIGURATIONS ============================== */
-#include <WiFi.h>
-/*
-#include <WiFi.h>
+void enableGPS(void)
+{
+    // Set Modem GPS Power Control Pin to HIGH ,turn on GPS power
+    // Only in version 20200415 is there a function to control GPS power
+    modem.sendAT("+CGPIO=0,48,1,1");
+    if (modem.waitResponse(10000L) != 1) {
+        DBG("Set GPS Power HIGH Failed");
+    }
+    modem.enableGPS();
+}
 
-const char *ssid = "fly01";
-const char *password = "blackmon2023";
-WiFiClient client;
-*/
-
-/* ============================== MQTT CONFIGURATIONS ============================== */
-
-#include <PubSubClient.h>
-PubSubClient mqtt(client);
-//const char *broker = "broker.emqx.io";
-const char *broker = "broker.hivemq.com"; // < ================================= SERVER BROKER
-const int mqtt_port = 1883;
-const char *mqtt_user = "web_client";
-const char *mqtt_pass = "080076C";
-const char *mqtt_id = "kjljihiukl";
-const char *topicSubscribe = "jphOandG/device"; // < ================================= TOPIC
-const char *topicPublish = "jphOandG/data";
-
-/* ====================== DEVICE SETTINGS ======================== */
-#define uS_TO_S_FACTOR 1000000
-int TIME_TO_SLEEP = 300; // 5 minutes sleep
-
-RTC_DATA_ATTR unsigned int bootCount = 0; // data counter
-boolean Available = true; // false: only level / true: level and dynachart
-String DeviceName = "";
-String idTest;
-
-String status = ""; // global status
-
-
-float a0[50] = {-0.161094, 0.133767, 0.509254, 0.586077, 0.588004, 0.572422, 0.577633, 0.567187, 0.58284, 0.574648, 0.567952, 0.564416, 0.566411, 0.591799, 0.592944, 0.584578, 0.607816, 0.609944, 0.606361, 0.607037, 0.625326, 0.663207, 0.661868, 0.597974, 0.369072, 0.179431, -0.0484264, -0.113182, -0.097836, -0.0759193, -0.0531394, -0.0452247, -0.0245321, -0.0140658, -0.010772, -0.0177663, -0.0145408, -0.00956059, -0.0108517, 0.00724792, 0.0163409, 0.0166782, 0.0187881, 0.0292116, 0.0331711, 0.0459051, 0.0554916, -0.0497948, -0.202742, -0.291714};
-
-void setup_wifi();
-void mqttCallback(char *topic, byte *payload, unsigned int length);
-
+void disableGPS(void)
+{
+    // Set Modem GPS Power Control Pin to LOW ,turn off GPS power
+    // Only in version 20200415 is there a function to control GPS power
+    modem.sendAT("+CGPIO=0,48,1,0");
+    if (modem.waitResponse(10000L) != 1) {
+        DBG("Set GPS Power LOW Failed");
+    }
+    modem.disableGPS();
+}
 /* ====================== RECONNECT ======================== */
 void reconnect()
 {
   int count = 0;
   while (!mqtt.connected())
   {
-    //Serial.println("...try coinnecte");
+    Serial.println("...try coinnecte");
     //if (mqtt.connect(mqtt_id, mqtt_user, mqtt_pass, topicPublish, 0, false, "Device conected"))
     if (mqtt.connect(mqtt_id))
     {
@@ -152,12 +173,67 @@ void reconnect()
     {
       if (count == 5)
       {
-        //Serial.println("reset mqtt");
+        Serial.println("reset mqtt");
+        modemRestart();
         ESP.restart();
       }
       delay(5000);
     }
     count++;
+  }
+}
+
+/* ============================== SETUP GRPS ============================== */
+boolean setup_grps()
+{
+  Serial.println("gprs stup");
+
+  modemPowerOn();
+
+  SerialAT.begin(UART_BAUD, SERIAL_8N1, PIN_RX, PIN_TX);
+  delay(3000);
+
+  if (!modem.init()) {
+    modemRestart();
+    delay(2000);
+    Serial.println("Failed to restart modem, attempting to continue without restarting");
+    return false;
+  }
+
+  String modemInfo = modem.getModemInfo();
+  Serial.println(modemInfo);
+
+  if (modemInfo == "")
+  {
+    Serial.println("modem fail");
+    return false;
+  }
+  /* */
+  if (!modem.waitForNetwork(240000L))
+  {
+    Serial.println("nt fail");
+    return false;
+  }
+  
+  if (modem.isNetworkConnected())
+  {
+    Serial.println("connected");
+  }
+  else
+  {
+    return false;
+  }
+
+  if (!modem.gprsConnect(apn))
+  //if (!modem.gprsConnect(apn, gprsUser, gprsPass))
+  {
+    Serial.println("grps fail");
+    return false;
+  }
+  else
+  {
+    Serial.println("grps ok"); // sim  grps ok
+    return true;
   }
 }
 
@@ -232,20 +308,32 @@ void fillPump()
 float acceleration(){
   sensors_event_t a, g, temp;
   mpu.getEvent(&a, &g, &temp);
-  return a.acceleration.y; 
+  return a.acceleration.z; 
 }
 
-float loadHx711(){
-  if (scale.is_ready())
+/* ************************* SETUP WIFI ************************** */
+void setup_wifi()
+{
+  WiFi.begin(ssid, password);
+  delay(100);
+  int count = 0;
+  while (WiFi.status() != WL_CONNECTED)
   {
-    return (scale.get_units(1));
+      //Serial.print(ssid);
+      delay(5000);
+      if (count == 3)
+      {
+          //Serial.println("reset wifi");
+          ESP.restart();
+      }
+      count++;
   }
+  delay(2000);
 }
 
-
-/*
-void main_process_ads1200(){
+void main_process(){
   //analogReadResolution(12);
+  Serial.println("Start main process");
   Average<float> acc_raw(read_n_max);
   Average<float> load_raw(read_n_max);
 
@@ -257,10 +345,9 @@ void main_process_ads1200(){
   // ------- data preread ------- 
   for (uint16_t i = 0; i < 100; i++)
   {
-
     s_acc += acceleration();
     s_load += ads.getVoltage_mV();
-    delay(35);
+    delay(90);
   }
 
   f_load = s_load * 0.01;
@@ -271,16 +358,17 @@ void main_process_ads1200(){
 
   for (uint16_t i = 0; i < read_n_max; i++)
   {
-    
     f_acc = (alpha_a * acceleration()) + ((1 - alpha_a) * f_acc);
     f_load = (alpha_l * ads.getVoltage_mV()) + ((1 - alpha_l) * f_load);
     Serial.println(String(i) + "-> " +String(f_acc) + " - " + String(f_load));
     acc_raw.push(f_acc);
     load_raw.push(f_load);
-    delay(35);
+    delay(90);
   }
   
   endTime = millis() - startTime;
+
+  Serial.println(endTime);
 
   // ----------------- Preprocessing ----------------- 
   float maxAcc = 0;
@@ -303,7 +391,7 @@ void main_process_ads1200(){
 
   // ----------------- ----------------- Main process service ----------------- ----------------- 
   // ************ Detect pump stopped service ************ 
-  if ((maxAcc - minAcc) <= 0.50)
+  if ((maxAcc - minAcc) <= 0.25)
   {
     status = "stopped";
     //Serial.println("stopped");
@@ -315,7 +403,7 @@ void main_process_ads1200(){
     //Serial.println("rods broken");
   //}
   
-  //else{
+  else{
     // ************ Separe stroke ************ 
     status = "running";
     //Serial.println("Separe stroke");
@@ -364,6 +452,8 @@ void main_process_ads1200(){
 
     Serial.println("acc: " + String(minAcc) + "," + String(maxAcc) + "; mmin index " + String(i_start) + " min index: " + String(i_end));
 
+    spm = 60000000.00/(endTime * (i_end - i_start));
+
     // ************ detect stroke integrity ************ 
     if (i_start == 0 || i_end == 0)
     {
@@ -391,11 +481,11 @@ void main_process_ads1200(){
       // a0[i] = temp;
     }
 
-    temp = mapfloat(load_raw.get(i_end), 0, 300, 0, 6.5);
+    //temp = mapfloat(load_raw.get(i_end), 0, 300, 0, 6.5);
     //Serial.println(String(acc_raw.get(i_end)));
 
     pos.push(acc_raw.get(i_end));
-    load.push(temp);
+    load.push(load_raw.get(i_end));
     // a0[49] = temp;
 
     // ************ NN for diagnosis ************ 
@@ -431,6 +521,7 @@ void main_process_ads1200(){
   else
   {
     docOut["fill"] = serialized(String(fill,2));
+    docOut["SPM"] = spm;
     JsonArray diag = docOut.createNestedArray("diag");
     for (int8_t i = 0; i < 10; i++)
     {
@@ -454,269 +545,38 @@ void main_process_ads1200(){
       //l.add((float) ( load.get(i));
 
     }
-  }
-
-  serializeJson(docOut, payload);
-  Serial.println(payload);
-
-  //setup_wifi();
-  mqtt.setServer(broker, mqtt_port);
-  //mqtt.setCallback(mqttCallback);
-  reconnect();
-  //mqtt.publish(topicPublish, "mmmmela");
-  mqtt.publish(topicPublish, payload.c_str());
-
-}
-*/
-
-void main_process(){
-  //analogReadResolution(12);
-  Average<float> acc_raw(read_n_max);
-  Average<float> load_raw(read_n_max);
-
-  float f_load; // load raw filter
-  float f_acc;  // acc raw filter
-  float s_acc = 0;
-  float s_load = 0;
-
-  /* ------- data preread ------- */
-  for (uint16_t i = 0; i < 100; i++)
-  {
-
-    s_acc += acceleration();
-    s_load += loadHx711();
-    delay(35);
-  }
-
-  f_load = s_load * 0.01;
-  f_acc = s_acc * 0.01;
-
-  /* ------- main data reading ------- */
-  startTime = millis();
-
-  for (uint16_t i = 0; i < read_n_max; i++)
-  {
-    
-    f_acc = (alpha_a * acceleration()) + ((1 - alpha_a) * f_acc);
-    f_load = (alpha_l * loadHx711()) + ((1 - alpha_l) * f_load);
-    Serial.println(String(i) + "-> " +String(f_acc) + " - " + String(f_load));
-    acc_raw.push(f_acc);
-    load_raw.push(f_load);
-    delay(35);
-  }
-  
-  endTime = millis() - startTime;
-
-  /* ----------------- Preprocessing ----------------- */
-  float maxAcc = 0;
-  float minAcc = 0;
-  float maxLoad = 0;
-  float minLoad = 0;
-
-  int max_acc_index = 0;
-  int min_acc_index = 0;
-  int max_load_index = 0;
-  int min_load_index = 0;
-
-  maxAcc = acc_raw.maximum(&max_acc_index);
-  minAcc = acc_raw.minimum(&min_acc_index);
-  maxLoad = load_raw.maximum(&max_load_index);
-  minLoad = load_raw.minimum(&min_load_index);
-
-  Average<float> load(50);
-  Average<float> pos(50);
-
-  /* ----------------- ----------------- Main process service ----------------- ----------------- */
-  /* ************ Detect pump stopped service ************ */
-  if ((maxAcc - minAcc) <= 0.50)
-  {
-    status = "stopped";
-    //Serial.println("stopped");
   }
   /*
-  else if (abs(maxLoad - minLoad) <= 100.00)
-  {
-    status = "running";
-    //Serial.println("rods broken");
+  enableGPS();
+  float lat,  lon;
+  int counter = 0;
+  while (1) {
+    if (modem.getGPS(&lat, &lon)) {
+      Serial.println("The location has been locked, the latitude and longitude are:");
+      Serial.print("latitude:"); Serial.println(lat);
+      Serial.print("longitude:"); Serial.println(lon);
+      break;
+    }
+    Serial.println(counter);
+    delay(500);
+    if(counter == 1 ) break;
+    counter++;
   }
+  disableGPS();
   */
-  else{
-    /* ************ Separe stroke ************ */
-    status = "running";
-    //Serial.println("Separe stroke");
-
-    float value;
-    int16_t i_start = 0;
-    int16_t i_flag = 0;
-    int16_t i_end = 0;
-    float tp = 0;
-    float diff;
-    float range = maxAcc - minAcc;
-
-    for (int16_t i = 0; i < read_n_max - 1; i++)
-    {
-      value = acc_raw.get(i);
-      diff = value - minAcc;
-      if (diff > 0.8 * range && i_flag == 0 && i_end == 0)
-      {
-        if (diff > tp)
-        {
-          tp = diff;
-          i_start = i;
-        }
-      }
-      else if (i_start != 0 && diff < 0.2 * range && i_end == 0)
-      {
-        if (diff < tp)
-        {
-          tp = diff;
-          i_flag = i;
-        }
-      }
-      else if (i_flag != 0 && diff > 0.8 * range)
-      {
-        if (diff > tp)
-        {
-          tp = diff;
-          i_end = i;
-        }
-      }
-      else if (diff < 0.2 * range && i_end != 0)
-      {
-        break;
-      }
-    }
-
-    Serial.println("acc: " + String(minAcc) + "," + String(maxAcc) + "; mmin index " + String(i_start) + " min index: " + String(i_end));
-
-    /* ************ detect stroke integrity ************ */
-    if (i_start == 0 || i_end == 0)
-    {
-      Serial.println("Incomplete dynachart.");
-      //Serial.println("------------------ end");
-    }
-
-    /* ************ resize array to 50 ************ */
-    float length = float(i_end - i_start) / 49.00;
-
-    //Average<float> load(50);
-    //Average<float> pos(50);
-
-    float temp;
-    int index;
-    for (int i = 0; i < 49; i++)
-    {
-      index = i_start + i * length;
-      temp = mapfloat(load_raw.get(index),-40,30,6.5,0);
-      //float t_load = load_raw.get(index);
-      float t_pos = acc_raw.get(index);
-      load.push(temp);
-      pos.push(t_pos);
-      //Serial.print(String(acc_raw.get(index)) + ",");
-      // a0[i] = temp;
-    }
-
-    temp = mapfloat(load_raw.get(index),-40,30,6.5,0);
-    load.push(temp);
-    //Serial.println(String(acc_raw.get(i_end)));
-
-    pos.push(acc_raw.get(i_end));
-    // a0[49] = temp;
-
-    /* ************ NN for diagnosis ************ */
-    diagnosis();
-    /*
-    for (int i = 0; i < 10; i++)
-    {
-      Serial.print(String(v_diagnosis[i]) + ",");
-    }
-    */
-
-    //Serial.println();
-
-    /* ************ NN for fillpump ************ */
-    fillPump();
-    //Serial.println(String(fill));
-  }
-
-  /* ------- payload to send data by json ------- */
-  String payload = "";
-  StaticJsonDocument<2048> docOut;
-  docOut["type"] = "analyzer";
-  docOut["name"] = DeviceName;
-  docOut["mac"] = WiFi.macAddress();
-  docOut["count"] = bootCount;
-  docOut["status"] = status;
-  docOut["idTest"] = idTest;
-  if (status == "stopped")
-  {
-    docOut["fill"] = 0;
-    docOut["SPM"] = 0;
-  }
-  else
-  {
-    docOut["fill"] = serialized(String(fill,2));
-    JsonArray diag = docOut.createNestedArray("diag");
-    for (int8_t i = 0; i < 10; i++)
-    {
-      if (v_diagnosis[i] > 0.7) // tresholder 0.7
-      {
-        diag.add(i);
-      }
-    }
-    
-    JsonArray p = docOut.createNestedArray("p");
-    JsonArray l = docOut.createNestedArray("l");
-
-    for (int i = 0; i < 50; i++)
-    {
-      //Serial.print(i);
-      //Serial.print(" ");
-      //Serial.println(String(pos.get(i),2));
-
-      p.add(pos.get(i));
-      l.add(load.get(i));
-      //l.add((float) ( load.get(i));
-
-    }
-  }
-
   serializeJson(docOut, payload);
   Serial.println(payload);
 
+  //setup_grps();
   setup_wifi();
   mqtt.setServer(broker, mqtt_port);
-  //mqtt.setCallback(mqttCallback);
+  mqtt.setCallback(mqttCallback);
   reconnect();
-  //mqtt.publish(topicPublish, "mmmmela");
   mqtt.publish(topicPublish, payload.c_str());
 
 }
 
-
-/* ************************* SETUP WIFI ************************** */
-/* 
-void setup_wifi()
-{
-  WiFi.begin(ssid, password);
-  delay(100);
-  int count = 0;
-  while (WiFi.status() != WL_CONNECTED)
-  {
-      //Serial.print(ssid);
-      delay(5000);
-      if (count == 3)
-      {
-          //Serial.println("reset wifi");
-          ESP.restart();
-      }
-      count++;
-  }
-  delay(2000);
-}
-*/
-
-/* ====================== mqtt Callback ======================== */
+/* ====================== MQTT CALLBACK ======================== */
 void mqttCallback(char *topic, byte *payload, unsigned int length)
 {
   Serial.println(topic);
@@ -763,28 +623,36 @@ void mqttCallback(char *topic, byte *payload, unsigned int length)
     {
       msg_in += String((char)payload[i]);
     }
-    if(msg_in == WiFi.macAddress()){
-      Serial.println("start deep sleep");
+
+    StaticJsonDocument<200> docIn;
+    DeserializationError error = deserializeJson(docIn, msg_in);
+    if (error) {
+      // Serial.print(F("deserializeJson() failed: "));
+      //Serial.println(error.f_str());
+      return;
+    }
+    const char* Name = docIn["name"];
+    int Time = docIn["timeSleep"];
+    const char* Mac = docIn["mac"];
+
+    if(String(Mac) == WiFi.macAddress()){
+      Serial.println("start deep sleep.......");
+      TIME_TO_SLEEP = Time - 40;
+      DeviceName = String(Name);
+      esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
+
+      gpio_hold_dis(GPIO_NUM_4);
+      modemPowerOff();
       esp_deep_sleep_start();
     }
       
   }
 }
 
-/* ====================== SETUP HX711 ======================== */
-void setup_HX711() {
-  scale.begin(dataPin, clockPin);
-
-  scale.set_scale(127.15);
-  scale.tare(10);
-
-}
-
 /* ====================== SETUP ADS1220 ======================== */
-/*
-void setup_ADS1220() {
+void setup_ADS1220(){
    if(!ads.init()){
-    //Serial.println("ADS1220 is not connected!");
+    Serial.println("ADS1220 is not connected!");
     while(1);
   }
 
@@ -797,16 +665,28 @@ void setup_ADS1220() {
   ads.setOperatingMode(ADS1220_TURBO_MODE);
   ads.setFIRFilter(ADS1220_50HZ);
 }
-*/
+
+void setup_SD(){
+  SPI.begin(SD_SCLK, SD_MISO, SD_MOSI);
+  if (!SD.begin(SD_CS)){
+    Serial.println("SDCard MOUNT FAIL");
+  }else{
+    uint32_t cardSize = SD.cardSize() / (1024 * 1024);
+    String str = "SDCard Size: " + String(cardSize) + "MB";
+    Serial.println(str);
+  }
+}
 
 /* ====================== SETUP ======================== */
 void setup() {
   Serial.begin(115200);
+  modemPowerOn();
 
-  setup_HX711();
+  setup_ADS1220();
+  setup_SD();
 
   if (!mpu.begin()) {
-    //Serial.println("Failed to find MPU6050 chip");
+    Serial.println("Failed to find MPU6050 chip");
     while (1) {
       delay(10);
     }
@@ -818,15 +698,15 @@ void setup() {
   ++bootCount;
   esp_sleep_enable_timer_wakeup(TIME_TO_SLEEP * uS_TO_S_FACTOR);
 
-  //setup_wifi();
-  Serial.println(WiFi.macAddress());
-  mqtt.setServer(broker, mqtt_port);
-  mqtt.setCallback(mqttCallback);
-  
-  reconnect();
+  //setup_grps();
+  //Serial.println(WiFi.macAddress());
+  //mqtt.setServer(broker, mqtt_port);
+  //mqtt.setCallback(mqttCallback);
+
+  //reconnect();
   //Serial.println(WiFi.macAddress());
 
-  //main_process();
+  main_process();
   
 }
 
@@ -836,4 +716,13 @@ void loop() {
   }
   mqtt.loop();
   delay(50);
+
+  unsigned long currentMillis = millis();
+
+  if (currentMillis - previousMillis >= WaitTime * 1000) {
+    Serial.println("start deep sleep without response");
+    gpio_hold_dis(GPIO_NUM_4);
+    modemPowerOff();
+    esp_deep_sleep_start();
+  }
 }
